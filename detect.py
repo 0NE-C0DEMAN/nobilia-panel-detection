@@ -29,14 +29,10 @@ def main(argv=None):
                     help="floor_plane.json (defaults to one beside --calib)")
     ap.add_argument("--out", default=None, help="output JSON path (default: stdout)")
     ap.add_argument("--overlay", default=None, help="optional path to save a box overlay PNG")
-    ap.add_argument("--method", choices=["yolo", "hybrid", "geometric"], default="yolo",
-                    help="yolo = trained YOLOv8-seg + depth (best); hybrid = FastSAM + depth; "
-                         "geometric = depth-only, no torch dependency")
+    ap.add_argument("--method", choices=["yolo", "geometric"], default="yolo",
+                    help="yolo = trained model + depth (default); geometric = depth-only fallback")
     ap.add_argument("--weights", default="models/panel_seg_v5_l960.pt",
                     help="YOLOv8-seg weights for --method yolo")
-    ap.add_argument("--fallback", default=None,
-                    help="optional fallback weights, used only when the primary model "
-                         "detects nothing (e.g. an off-pose frame)")
     args = ap.parse_args(argv)
 
     rgb = cv2.imread(args.rgb)
@@ -49,11 +45,7 @@ def main(argv=None):
     calib = load_calibration(args.calib, floor_path=args.floor)
     if args.method == "yolo":
         from panel_detector.yolo_detector import YoloPanelDetector
-        det = YoloPanelDetector(args.weights,
-                                fallback_weights=args.fallback).detect(rgb, depth, calib)
-    elif args.method == "hybrid":
-        from panel_detector.sam_detector import HybridPanelDetector
-        det = HybridPanelDetector().detect(rgb, depth, calib)
+        det = YoloPanelDetector(args.weights).detect(rgb, depth, calib)
     else:
         det = detect_panels(rgb, depth, calib)
     result = to_json(det, image_name=Path(args.rgb).name,

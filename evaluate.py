@@ -36,21 +36,15 @@ def main():
     ap.add_argument("--floor", default=None)
     ap.add_argument("--out", default="outputs")
     ap.add_argument("--montage", type=int, default=12, help="frames in the montage grid")
-    ap.add_argument("--method", choices=["yolo", "hybrid", "geometric"], default="yolo")
+    ap.add_argument("--method", choices=["yolo", "geometric"], default="yolo")
     ap.add_argument("--weights", default="models/panel_seg_v5_l960.pt")
-    ap.add_argument("--fallback", default=None,
-                    help="optional fallback weights for --method yolo (used only when "
-                         "the primary model detects nothing, e.g. an off-pose frame)")
     args = ap.parse_args()
 
     calib = load_calibration(args.calib, floor_path=args.floor)
     if args.method == "yolo":
         from panel_detector.yolo_detector import YoloPanelDetector
-        model = YoloPanelDetector(args.weights, fallback_weights=args.fallback)
+        model = YoloPanelDetector(args.weights)
         run = lambda r, d: model.detect(r, d, calib)
-    elif args.method == "hybrid":
-        from panel_detector.sam_detector import HybridPanelDetector
-        model = HybridPanelDetector()
         run = lambda r, d: model.detect(r, d, calib)
     else:
         run = lambda r, d: detect_panels(r, d, calib)
