@@ -3,7 +3,7 @@ segments the panels; the depth + calibration turn each mask into an oriented box
 a base-frame pick centre, a height above the floor and a top-layer flag.
 
     from panel_detector.yolo_detector import YoloPanelDetector
-    det = YoloPanelDetector("models/panel_seg_gemma.pt")
+    det = YoloPanelDetector("models/panel_seg_v5_l960.pt")
     result = det.detect(rgb, depth_mm, calib)
 """
 from __future__ import annotations
