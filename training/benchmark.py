@@ -3,15 +3,18 @@
 TP = a predicted panel matches a ground-truth panel at IoU >= threshold
 (greedy one-to-one matching); reports F1 at IoU 0.50 / 0.80 / 0.90 and the
 mean IoU of matched panels. Uses the same post-processing as detect.py
-(panel class only, min area, mask-level NMS).
+(panel class only, min area, duplicate removal, non-overlap resolution, L-split).
 
-    python benchmark.py --weights ../models/panel_seg_v5_l960.pt --benchmark benchmark_export
+    python benchmark.py --weights ../models/panel_seg_v26_l960.pt --benchmark benchmark_export
 """
-import argparse, json, os, re
+import argparse, json, os, re, sys
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from panel_detector.yolo_detector import _l_split, _resolve_overlaps
 
 
 def load_gt(bench_dir):
@@ -46,7 +49,7 @@ def iou(a, b):
     return (a & b).sum() / u if u else 0.0
 
 
-def predict(model, panel_ids, img, imgsz=960, conf=0.45, min_area=640, mask_nms=0.35):
+def predict(model, panel_ids, img, imgsz=960, conf=0.35, min_area=640, dup_overlap=0.8):
     r = model.predict(img, imgsz=imgsz, conf=conf, iou=0.6, retina_masks=True, verbose=False)
     if not r or r[0].masks is None:
         return []
@@ -63,10 +66,15 @@ def predict(model, panel_ids, img, imgsz=960, conf=0.45, min_area=640, mask_nms=
     cand.sort(key=lambda t: -t[0])
     out = []
     for c, mm in cand:
-        if any((mm & k).sum() / min(mm.sum(), k.sum()) > mask_nms for k in out):
+        if any((mm & k).sum() / min(mm.sum(), k.sum()) > dup_overlap for k in out):
             continue
         out.append(mm)
-    return out
+    out = _resolve_overlaps(out)
+    final = []
+    for j, mm in enumerate(out):
+        s = _l_split(mm, [q for k, q in enumerate(out) if k != j], min_area)
+        final.extend(s if s is not None else [mm])
+    return [m for m in final if m.sum() >= min_area]
 
 
 def main():

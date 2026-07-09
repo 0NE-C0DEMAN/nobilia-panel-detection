@@ -31,7 +31,7 @@ def main(argv=None):
     ap.add_argument("--overlay", default=None, help="optional path to save a box overlay PNG")
     ap.add_argument("--method", choices=["yolo", "geometric"], default="yolo",
                     help="yolo = trained model + depth (default); geometric = depth-only fallback")
-    ap.add_argument("--weights", default="models/panel_seg_v5_l960.pt",
+    ap.add_argument("--weights", default="models/panel_seg_v26_l960.pt",
                     help="YOLOv8-seg weights for --method yolo")
     args = ap.parse_args(argv)
 

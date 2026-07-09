@@ -1,9 +1,15 @@
-"""Deliverable detector: YOLOv8-seg (trained on Gemma-4 + SAM masks) locates and
-segments the panels; the depth + calibration turn each mask into an oriented box,
-a base-frame pick centre, a height above the floor and a top-layer flag.
+"""Deliverable detector: YOLO26-seg locates and segments the panels; the depth +
+calibration turn each mask into an oriented box, a base-frame pick centre, a height
+above the floor and a top-layer flag.
+
+Mask post-processing exploits two facts about the annotation/scene geometry:
+panels never overlap in the label space (each is annotated as its visible area), and
+every panel is a rectangle seen from above. So predicted masks are never discarded
+for overlapping - contested pixels are reassigned to the nearest mask core - and a
+mask forming an unexplained L-shape is two butt-joined panels merged, and is split.
 
     from panel_detector.yolo_detector import YoloPanelDetector
-    det = YoloPanelDetector("models/panel_seg_v5_l960.pt")
+    det = YoloPanelDetector("models/panel_seg_v26_l960.pt")
     result = det.detect(rgb, depth_mm, calib)
 """
 from __future__ import annotations
@@ -93,14 +99,107 @@ def _perspective_box(mask_shape: np.ndarray, h0: float, fn: np.ndarray,
             size_mm, round(float(angle), 1), h0)
 
 
+def _resolve_overlaps(masks):
+    """Panels are annotated as non-overlapping visible areas, so a pixel claimed by
+    two masks is wrong for at least one of them. Reassign every contested pixel to
+    the mask whose undisputed core is nearest (NOT to the more confident mask - the
+    bleeding mask is usually the confident one)."""
+    if len(masks) < 2:
+        return masks
+    cnt = np.zeros(masks[0].shape, np.uint8)
+    for m in masks:
+        cnt += m
+    contested = cnt > 1
+    if not contested.any():
+        return masks
+    dists = []
+    for m in masks:
+        core = m & ~contested
+        if core.sum() == 0:
+            core = m
+        dists.append(cv2.distanceTransform((~core).astype(np.uint8), cv2.DIST_L2, 3))
+    owner = np.argmin(np.stack(dists), axis=0)
+    return [m & (~contested | (owner == j)) for j, m in enumerate(masks)]
+
+
+def _fill_ratio(m):
+    cnts, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return 1.0, None
+    c = max(cnts, key=cv2.contourArea)
+    ra = cv2.minAreaRect(c)[1][0] * cv2.minAreaRect(c)[1][1]
+    return (m.sum() / ra if ra > 0 else 1.0), c
+
+
+def _l_split(m, others, min_area):
+    """A panel is a rectangle, so a mask that fills its own oriented rect poorly and
+    has exactly one concave corner - with that notch NOT covered by another detected
+    panel (which would explain it as occlusion) - is two same-colour butt-joined
+    panels the model merged into one. Split it through the concave corner, trying the
+    corner's own edge directions and the blob's principal axes, and accept the cut
+    whose two parts are the most rectangular. Returns (part_a, part_b) or None."""
+    fr, c = _fill_ratio(m)
+    if fr >= 0.80 or c is None:
+        return None
+    ap = cv2.approxPolyDP(c, 0.012 * cv2.arcLength(c, True), True).reshape(-1, 2)
+    if len(ap) < 4:
+        return None
+    orient = 1 if cv2.contourArea(ap.reshape(-1, 1, 2), True) > 0 else -1
+    refl = [i for i in range(len(ap))
+            if np.sign((ap[i][0] - ap[i - 1][0]) * (ap[(i + 1) % len(ap)][1] - ap[i][1])
+                       - (ap[i][1] - ap[i - 1][1]) * (ap[(i + 1) % len(ap)][0] - ap[i][0])) == -orient
+            and abs((ap[i][0] - ap[i - 1][0]) * (ap[(i + 1) % len(ap)][1] - ap[i][1])
+                    - (ap[i][1] - ap[i - 1][1]) * (ap[(i + 1) % len(ap)][0] - ap[i][0])) > 40]
+    if len(refl) != 1:
+        return None
+    i = refl[0]
+    R = ap[i].astype(np.float32)
+    box = cv2.boxPoints(cv2.minAreaRect(c)).astype(np.int32)
+    rm = np.zeros(m.shape, np.uint8)
+    cv2.fillPoly(rm, [box], 1)
+    notch = (rm > 0) & ~m
+    if notch.sum() > 0 and others:
+        claimed = np.zeros(m.shape, bool)
+        for o in others:
+            claimed |= o
+        if (notch & claimed).sum() / notch.sum() > 0.35:
+            return None                     # occlusion by a detected panel, legit shape
+    dirs = []
+    for j in (i - 1, i + 1):
+        d = R - ap[j % len(ap)].astype(np.float32)
+        nd = np.linalg.norm(d)
+        if nd >= 6:
+            dirs.append(d / nd)
+    ang = np.deg2rad(cv2.minAreaRect(c)[2])
+    dirs.append(np.array([np.cos(ang), np.sin(ang)], np.float32))
+    dirs.append(np.array([-np.sin(ang), np.cos(ang)], np.float32))
+    best = None
+    for d in dirs:
+        cut = m.astype(np.uint8).copy()
+        cv2.line(cut, tuple((R - d * 2000).astype(int)), tuple((R + d * 2000).astype(int)), 0, 3)
+        n, lbl = cv2.connectedComponents(cut)
+        if n < 3:
+            continue
+        top = np.argsort([(lbl == k).sum() for k in range(1, n)])[::-1][:2]
+        pa, pb = lbl == top[0] + 1, lbl == top[1] + 1
+        if min(pa.sum(), pb.sum()) < max(min_area, 0.12 * m.sum()):
+            continue
+        sc = min(_fill_ratio(pa)[0], _fill_ratio(pb)[0])
+        if sc > 0.70 and sc > fr + 0.02 and (best is None or sc > best[0]):
+            grow = cv2.dilate(pa.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+            pa2 = (grow & m & ~pb) | pa     # heal the cut line into part a
+            best = (sc, pa2, pb | (m & ~pa2))
+    return None if best is None else (best[1], best[2])
+
+
 @dataclass
 class YoloParams:
-    weights: str = "models/panel_seg_v5_l960.pt"
-    conf: float = 0.45
+    weights: str = "models/panel_seg_v26_l960.pt"
+    conf: float = 0.35
     iou: float = 0.6
     imgsz: int = 960
     min_area_px: int = 640
-    mask_nms: float = 0.35                 # drop a mask overlapping a higher-conf one by more
+    dup_overlap: float = 0.8               # only a near-identical mask is a duplicate
     top_layer_band_mm: float = 30.0
     occlusion_step_mm: float = 15.0
     occlusion_overlap_frac: float = 0.15
@@ -163,15 +262,21 @@ class YoloPanelDetector:
             m = cv2.resize(m.astype(np.uint8), (w, h)) > 0.5
             if m.sum() >= self.p.min_area_px:
                 cand.append((float(confs[i]), m))
-        # Mask-level NMS: a mask mostly covered by a higher-confidence mask is a
-        # duplicate / over-split of the same panel - drop it.
+        # A detection is never discarded for merely overlapping another (a thin panel
+        # sliver legitimately overlaps the mask of the panel covering it) - only a
+        # near-identical lower-confidence mask is a duplicate of the same panel.
         cand.sort(key=lambda t: -t[0])
         out = []
         for c, m in cand:
-            if any((m & k).sum() / min(m.sum(), k.sum()) > self.p.mask_nms for k in out):
+            if any((m & k).sum() / min(m.sum(), k.sum()) > self.p.dup_overlap for k in out):
                 continue
             out.append(m)
-        return out
+        out = _resolve_overlaps(out)
+        final = []
+        for j, m in enumerate(out):
+            s = _l_split(m, [q for k, q in enumerate(out) if k != j], self.p.min_area_px)
+            final.extend(s if s is not None else [m])
+        return [m for m in final if m.sum() >= self.p.min_area_px]
 
     def _get_masks(self, rgb, conf: float | None = None):
         """Primary model, falling back to the secondary model if it finds nothing."""

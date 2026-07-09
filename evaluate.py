@@ -37,7 +37,7 @@ def main():
     ap.add_argument("--out", default="outputs")
     ap.add_argument("--montage", type=int, default=12, help="frames in the montage grid")
     ap.add_argument("--method", choices=["yolo", "geometric"], default="yolo")
-    ap.add_argument("--weights", default="models/panel_seg_v5_l960.pt")
+    ap.add_argument("--weights", default="models/panel_seg_v26_l960.pt")
     args = ap.parse_args()
 
     calib = load_calibration(args.calib, floor_path=args.floor)
