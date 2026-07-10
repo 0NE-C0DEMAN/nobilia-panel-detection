@@ -1,112 +1,85 @@
-# Nobilia Panel Detection
+# Nobilia Label Detection
 
-Detects the top-layer furniture panels in an RGB-D bin frame. For every panel it returns
-an oriented bounding box, the pick centre (image pixels and robot base-frame metres),
-the metric size, the height above the bin floor and a top-layer flag.
+Detects the information labels (stickers) on Nobilia cabinet panels from a single RGB
+image, using a YOLO26-large instance-segmentation model at 1280 px input resolution.
 
-## Results (v26 branch)
+This is the **label detection** deliverable. Panel detection lives on the `main` /
+`v26` branches; this branch is self-contained for labels only.
 
-Benchmark: 28 annotated frames, excluded from training, mask-vs-mask F1 with one-to-one matching.
+## Results
 
-| Metric | v26 (this branch) | v5 (main) |
-|---|---|---|
-| F1 @ IoU >= 0.50 | **0.975** | 0.957 |
-| F1 @ IoU >= 0.80 (milestone 2 target 0.90) | **0.946** | 0.916 |
-| F1 @ IoU >= 0.90 (milestone 3 target 0.95) | **0.833** | 0.794 |
-| mean IoU of matched panels | **0.936** | 0.929 |
+Held-out test set (16 frames, 70 labels), detection-first scoring:
 
-Model: `models/panel_seg_v26_l960.pt` - YOLO26-large segmentation, 960 px input, 63 MB
-(30% smaller and faster than v5). Trained on 339 human-annotated frames (visible-area
-convention, classes: background, panel) plus occlusion-targeted synthetic images that
-teach the model to separate same-colour stacked panels.
+| Metric | IoU ≥ 0.5 | IoU ≥ 0.7 |
+| --- | --- | --- |
+| Recall (labels found) | **0.971** | 0.943 |
+| Precision (no false labels) | **0.971** | 0.943 |
+| F1 | **0.971** | 0.943 |
+| Mean IoU of matched labels | 0.894 | 0.903 |
 
-The gains over v5 come from three things: the newer model generation, more annotated
-frames, and geometric post-processing rules (see How it works).
+Training convergence: mask mAP50 **0.995**, mAP50-95 **0.832**.
 
-## Install
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Python 3.10+. Runs on CPU (about 2-3 s per frame) or GPU.
-
 ## Usage
 
-Single frame:
+### Detect labels in a single image
 
 ```bash
-python detect.py --rgb rgb_00002.png --depth depth_00002.png \
-                 --calib calib/cam_to_base_current.json \
-                 --out panels.json --overlay overlay.png
+python detect_labels.py --rgb image.png --out labels.json
 ```
 
-Folder of `rgb_*.png` / `depth_*.png` pairs:
+Output is JSON with each label's polygon (normalized 0–1 coordinates) and pixel area.
+
+### Benchmark
 
 ```bash
-python evaluate.py --data path/to/frames --out results
+python training/benchmark_labels.py --weights models/label_seg_best.pt --benchmark <coco_export>
 ```
 
-Output JSON per panel:
+Scoring is **detection-first**: labels are small stickers, so it uses a relaxed IoU
+(0.5 primary, 0.7 for good localization) and reports what matters in production —
+**recall** (are any labels missed?) and **precision** (are there any false labels?) —
+with the raw miss / false-label counts and the frames they occur in. It does not
+penalize a pixel or two of boundary slack on a correctly found label.
 
-```
-id, obb {cx, cy, w, h, angle_deg}, corners, center_px, center_base_m,
-height_mm, size_mm, angle_deg, top_layer
-```
+## Background sticker
 
-`top_layer: true` marks the panels the robot can pick next. If a frame was taken from a
-camera pose that does not match the calibration it is flagged `off_pose: true` and only
-2-D boxes are returned for it.
+The machine has a fixed sticker on its dark background structure near the top of every
+frame. It is **not** a panel label and is ignored: any detection whose centroid sits in
+the top `BG_TOP_FRACTION` (default 27%) of the frame is dropped. In the annotated data
+every real label sits below 38% of the frame height while this background sticker sits at
+~8–15%, so the gate removes it with margin and never drops a real label. The threshold is
+normalized to frame height, so it holds at any resolution. See `BG_TOP_FRACTION` in
+[label_detector/label_detector.py](label_detector/label_detector.py).
 
-## Validate the results
+## Model parameters
+
+- **Confidence threshold**: 0.4 (swept optimum; lower toward 0.3 only if labels are missed)
+- **Min area**: 100 px (stickers are ~30–60 px wide; filters debris)
+- **Input size**: 1280 px (small-object precision)
+- **NMS IoU**: 0.6
+- **Background gate**: top 27% of frame height (see above)
+
+## Training
 
 ```bash
-cd training
-python benchmark.py --weights ../models/panel_seg_v26_l960.pt --benchmark <benchmark_export_dir>
+python training/train_labels.py --data <data.yaml> --epochs 200 --batch 4
 ```
 
-`<benchmark_export_dir>` is the COCO-segmentation export of the 28 annotated benchmark
-frames. The script applies the same matching rule and post-processing as `detect.py`
-and prints F1 at IoU 0.50 / 0.80 / 0.90 plus the mean IoU.
+YOLO26-large seg, 1280 px, 200 epochs, patience 50. Trained on 119 annotated frames
+(735 label instances); 24 val / 16 test held out.
 
-## Retrain with new annotations
-
-```bash
-cd training
-python prepare_dataset.py --exports <roboflow_export> --benchmark <benchmark_export_dir> --out dataset
-python make_stack.py dataset 800
-python train.py --data dataset/data.yaml
-```
-
-`prepare_dataset.py` always excludes the benchmark frames, so the benchmark stays a clean
-test set. `make_stack.py` adds the synthetic stacked-panel images (recommended; skip to
-train on real frames only). Training takes about 1.5 hours on an RTX 4090. The new
-`best.pt` replaces `models/panel_seg_v26_l960.pt`.
-
-## Layout
+## Files
 
 ```
-detect.py                       single-frame CLI
-evaluate.py                     batch runner
-calibrate_floor.py              one-off floor-plane calibration
-panel_detector/                 detection library (model + depth geometry)
-models/panel_seg_v26_l960.pt    current model
-calib/                          camera-to-base transform + floor plane
-training/                       dataset conversion, synthesis, training, benchmark
+detect_labels.py                 single-image inference CLI
+label_detector/label_detector.py detector + background filter + JSON output
+training/train_labels.py         training recipe
+training/benchmark_labels.py     detection-first benchmark
+models/label_seg_best.pt         trained weights (63 MB)
 ```
-
-## How it works
-
-1. The segmentation model finds every visible panel surface (confidence 0.35; only a
-   near-identical duplicate mask is removed, so low-contrast panels are never lost).
-2. Overlap resolution: panels are annotated as non-overlapping visible areas, so a pixel
-   claimed by two masks is wrong for one of them - it is reassigned to the mask whose
-   undisputed core is nearest. This removes mask bleed across panel seams.
-3. L-split: a panel is a rectangle, so a mask that fills its oriented rectangle poorly,
-   has exactly one concave corner and no detected panel occluding it there is two
-   butt-joined same-colour panels merged into one - it is split at the concave corner.
-4. Depth is back-projected through the camera calibration; each panel gets its measured
-   height above the calibrated floor plane.
-5. The panel outline is fitted as an oriented box in the panel's own 3-D plane, so boxes
-   and centres are perspective-correct and metric.
-6. Floor rejection, occlusion and top-layer selection come from the measured heights.
