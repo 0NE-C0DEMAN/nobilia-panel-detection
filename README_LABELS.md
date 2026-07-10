@@ -31,13 +31,28 @@ Output is a JSON with label polygons (normalized 0–1 coordinates) and area in 
 python training/benchmark_labels.py --weights models/label_seg_best.pt --benchmark benchmark_export
 ```
 
-Scores the model on IoU thresholds 0.5, 0.75, 0.9 using greedy one-to-one mask matching.
+Scoring is **detection-first**: labels are small stickers, so the benchmark uses a
+relaxed IoU (0.5 primary, 0.7 for good localization) and reports what matters in
+production — **recall** (are any labels missed?) and **precision** (are there any
+false labels?) — with the raw miss / false-label counts and the frames they occur
+in. It does not penalize a pixel or two of boundary slack on a correctly found label.
+
+## Background sticker
+
+The machine has a fixed sticker on its dark background structure near the top of
+every frame. It is **not** a panel label and is ignored: any detection whose
+centroid sits in the top `BG_TOP_FRACTION` (default 27%) of the frame is dropped.
+In the annotated data every real label is below 38% of the frame height and this
+background sticker is at ~8–15%, so the gate removes it with margin and never drops
+a real label. The threshold is normalized to frame height, so it holds at any
+resolution. See `BG_TOP_FRACTION` in [label_detector/label_detector.py](label_detector/label_detector.py).
 
 ## Model Parameters
 
 - **Confidence threshold**: 0.4 (tuned for recall on small objects; lower to 0.3 if missing labels)
 - **Min area**: 100 pixels (stickers are ~30–60 px wide; tune to filter debris)
 - **IoU threshold**: 0.6 (NMS on raw YOLO output)
+- **Background gate**: top 27% of frame height (fixed background sticker; see above)
 
 ## Training
 
