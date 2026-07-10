@@ -8,16 +8,19 @@ This is the **label detection** deliverable. Panel detection lives on the `main`
 
 ## Results
 
-Held-out test set (16 frames, 70 labels), detection-first scoring:
+Held-out test set (30 frames, 148 labels), detection-first scoring:
 
 | Metric | IoU ≥ 0.5 | IoU ≥ 0.7 |
 | --- | --- | --- |
-| Recall (labels found) | **0.971** | 0.943 |
-| Precision (no false labels) | **0.971** | 0.943 |
-| F1 | **0.971** | 0.943 |
-| Mean IoU of matched labels | 0.894 | 0.903 |
+| Recall (labels found) | **1.000** | 0.993 |
+| Precision (no false labels) | **0.993** | 0.987 |
+| F1 | **0.997** | 0.990 |
+| Mean IoU of matched labels | 0.898 | 0.899 |
 
-Training convergence: mask mAP50 **0.995**, mAP50-95 **0.832**.
+The model is trained with synthetic augmentation targeting the hard cases — labels at
+all orientations, low-contrast **white labels on white/light panels**, and slightly
+blurry labels — so it holds up on light-on-light stickers that a plain model misses.
+See [Training](#training).
 
 ## Installation
 
@@ -71,8 +74,24 @@ normalized to frame height, so it holds at any resolution. See `BG_TOP_FRACTION`
 python training/train_labels.py --data <data.yaml> --epochs 200 --batch 4
 ```
 
-YOLO26-large seg, 1280 px, 200 epochs, patience 50. Trained on 119 annotated frames
-(735 label instances); 24 val / 16 test held out.
+YOLO26-large seg, 1280 px, 200 epochs, patience 50. Trained on 109 annotated frames
+plus synthetic augmentation (`training/make_label_synth.py`) with 20 val / 30 test
+held out (real frames only).
+
+### Synthetic augmentation
+
+`make_label_synth.py` keeps each real frame's panel layout fixed and pastes real
+label crops back onto the panel surfaces to manufacture the hard cases:
+
+- **Orientation**: labels are pasted at the full 0–360° range, so the model sees every
+  rotation on realistic layouts.
+- **White-on-white**: a share of pasted labels have their brightness matched to the
+  panel underneath (with only a faint seam shadow as the cue), teaching the model to
+  find low-contrast white labels on white/light panels.
+- **Blur**: a share of labels and whole frames are blurred, for out-of-focus / motion.
+
+Panel surfaces come from the panel model (RGB only); training then adds full rotation,
+both flips and brightness jitter on top.
 
 ## Files
 
@@ -80,6 +99,7 @@ YOLO26-large seg, 1280 px, 200 epochs, patience 50. Trained on 119 annotated fra
 detect_labels.py                 single-image inference CLI
 label_detector/label_detector.py detector + background filter + JSON output
 training/train_labels.py         training recipe
+training/make_label_synth.py     orientation / white-on-white / blur synth generator
 training/benchmark_labels.py     detection-first benchmark
 models/label_seg_best.pt         trained weights (63 MB)
 ```
